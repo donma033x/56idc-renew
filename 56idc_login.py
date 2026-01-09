@@ -351,64 +351,59 @@ class IDC56Login:
                 headless=False,
                 args=['--disable-blink-features=AutomationControlled']
             )
-            self.context = await self.browser.new_context(
-                viewport={'width': 1280, 'height': 900},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            )
-            self.page = await self.context.new_page()
-            self.cdp = await self.context.new_cdp_session(self.page)
-            Logger.log("启动", "浏览器已启动", "OK")
-            
-            # 加载会话
-            has_session = await self.load_session()
-            
-            if has_session:
-                # 检查会话是否有效
-                Logger.log("检查", "检查登录状态...", "WAIT")
-                await self.page.goto(DASHBOARD_URL)
-                await asyncio.sleep(5)
+            try:
+                self.context = await self.browser.new_context(
+                    viewport={'width': 1280, 'height': 900},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                )
+                self.page = await self.context.new_page()
+                self.cdp = await self.context.new_cdp_session(self.page)
+                Logger.log("启动", "浏览器已启动", "OK")
                 
-                # CF 挑战
-                for i in range(30):
-                    title = await self.page.title()
-                    if 'Just a moment' not in title:
-                        break
-                    await self.cdp.send('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': 210, 'y': 290})
-                    await asyncio.sleep(0.1)
-                    await self.cdp.send('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': 210, 'y': 290, 'button': 'left', 'clickCount': 1})
-                    await asyncio.sleep(0.05)
-                    await self.cdp.send('Input.dispatchMouseEvent', {'type': 'mouseReleased', 'x': 210, 'y': 290, 'button': 'left', 'clickCount': 1})
+                # 加载会话
+                has_session = await self.load_session()
+                
+                if has_session:
+                    Logger.log("检查", "检查登录状态...", "WAIT")
+                    await self.page.goto(DASHBOARD_URL)
+                    await asyncio.sleep(5)
+                    
+                    for i in range(30):
+                        title = await self.page.title()
+                        if 'Just a moment' not in title:
+                            break
+                        await self.cdp.send('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': 210, 'y': 290})
+                        await asyncio.sleep(0.1)
+                        await self.cdp.send('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': 210, 'y': 290, 'button': 'left', 'clickCount': 1})
+                        await asyncio.sleep(0.05)
+                        await self.cdp.send('Input.dispatchMouseEvent', {'type': 'mouseReleased', 'x': 210, 'y': 290, 'button': 'left', 'clickCount': 1})
+                        await asyncio.sleep(2)
+                    
                     await asyncio.sleep(2)
-                
-                await asyncio.sleep(2)
-                
-                if await self.check_logged_in():
-                    Logger.log("检查", "会话有效，已登录", "OK")
+                    
+                    if await self.check_logged_in():
+                        Logger.log("检查", "会话有效，已登录", "OK")
+                    else:
+                        Logger.log("检查", "会话已过期", "WARN")
+                        if not await self.login():
+                            return False
                 else:
-                    Logger.log("检查", "会话已过期", "WARN")
+                    Logger.log("检查", "无保存的会话，需要登录", "INFO")
                     if not await self.login():
-                        await self.browser.close()
                         return False
-            else:
-                Logger.log("检查", "无保存的会话，需要登录", "INFO")
-                if not await self.login():
-                    await self.browser.close()
-                    return False
-            
-            # 停留
-            Logger.log("保活", f"停留 {STAY_DURATION} 秒...", "WAIT")
-            for i in range(STAY_DURATION, 0, -1):
-                print(f"\r[{datetime.now().strftime('%H:%M:%S')}] [保活] ⏳ 剩余 {i} 秒...", end='', flush=True)
-                await asyncio.sleep(1)
-            print()
-            Logger.log("保活", "停留完成", "OK")
-            
-            # 保存会话
-            await self.save_session()
-            
-            Logger.log("结果", f"{self.email} 完成!", "OK")
-            await self.browser.close()
-            return True
+                
+                Logger.log("保活", f"停留 {STAY_DURATION} 秒...", "WAIT")
+                for i in range(STAY_DURATION, 0, -1):
+                    print(f"\r[{datetime.now().strftime('%H:%M:%S')}] [保活] ⏳ 剩余 {i} 秒...", end='', flush=True)
+                    await asyncio.sleep(1)
+                print()
+                Logger.log("保活", "停留完成", "OK")
+                
+                await self.save_session()
+                Logger.log("结果", f"{self.email} 完成!", "OK")
+                return True
+            finally:
+                await self.browser.close()
 
 
 async def main():
