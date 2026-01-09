@@ -58,9 +58,11 @@ xvfb-run uv run python 56idc_login.py
 
 ## 定时任务
 
+建议每周运行一次保持账号活跃。
+
 ```bash
 crontab -e
 
-# 每天上午 10 点运行
-0 10 * * * cd /path/to/56idc-auto-login && xvfb-run /home/user/.local/bin/uv run python 56idc_login.py >> /tmp/56idc.log 2>&1
+# 每周日上午 10 点运行
+0 10 * * 0 cd /path/to/56idc-auto-login && xvfb-run /home/user/.local/bin/uv run python 56idc_login.py >> /tmp/56idc.log 2>&1
 ```
