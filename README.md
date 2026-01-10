@@ -56,7 +56,7 @@ nano .env
 
 ```bash
 cd 56idc-renew
-xvfb-run uv run python renew.py
+xvfb-run uv run python 56idc-renew.py
 ```
 
 ## 定时任务
@@ -68,12 +68,12 @@ xvfb-run uv run python renew.py
 crontab -e
 
 # 每周日上午 10 点运行
-0 10 * * 0 cd /path/to/56idc-renew && xvfb-run ~/.local/bin/uv run python renew.py >> /tmp/56idc-renew.log 2>&1
+0 10 * * 0 cd /path/to/56idc-renew && xvfb-run ~/.local/bin/uv run python 56idc-renew.py >> /tmp/56idc-renew.log 2>&1
 ```
 
 ## 文件说明
 
-- `renew.py` - 主脚本
+- `56idc-renew.py` - 主脚本
 - `pyproject.toml` - 项目配置和依赖
 - `.env.example` - 配置文件示例
 - `sessions/` - 会话保存目录
