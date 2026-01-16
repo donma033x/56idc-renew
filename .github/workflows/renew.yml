@@ -1,0 +1,45 @@
+name: 56idc Renew
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 每天 UTC 2:00 (北京时间 10:00)
+  workflow_dispatch:  # 手动触发
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install playwright requests
+          playwright install chromium
+          playwright install-deps chromium
+      
+      - name: Create .env
+        run: |
+          cat > .env << EOF
+          ACCOUNTS=${{ secrets.ACCOUNTS }}
+          STAY_DURATION=10
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
+          TOTP_API_URL=${{ secrets.TOTP_API_URL }}
+          EOF
+      
+      - name: Restore sessions
+        uses: actions/cache@v4
+        with:
+          path: sessions
+          key: 56idc-sessions-${{ github.run_id }}
+          restore-keys: |
+            56idc-sessions-
+      
+      - name: Run renew script
+        run: xvfb-run python 56idc-renew.py
+        timeout-minutes: 15
