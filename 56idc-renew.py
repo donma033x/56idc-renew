@@ -5,12 +5,6 @@
 cron: 0 8 * * 1
 new Env('56idc-renew')
 
-功能:
-1. 支持多账号
-2. 自动通过 Cloudflare Turnstile 验证
-3. 自动登录 56idc.net
-4. 保存会话供下次使用
-
 环境变量:
     ACCOUNTS_56IDC: 账号配置，格式: 邮箱:密码:2FA密钥,邮箱:密码 (2FA密钥可选)
     STAY_DURATION: 停留时间(秒)，默认10
@@ -35,7 +29,7 @@ SESSION_DIR = Path(__file__).parent / "sessions"
 
 
 def get_config():
-    """获取配置 - 在运行时读取环境变量"""
+    """获取配置"""
     return {
         'accounts_str': os.environ.get('ACCOUNTS_56IDC', ''),
         'stay_duration': int(os.environ.get('STAY_DURATION', '10')),
@@ -46,7 +40,6 @@ def get_config():
 
 
 def parse_accounts(accounts_str: str) -> list:
-    """解析账号配置，格式: 邮箱:密码:2FA密钥 (2FA密钥可选)"""
     accounts = []
     if not accounts_str:
         return accounts
@@ -55,13 +48,10 @@ def parse_accounts(accounts_str: str) -> list:
         if ':' in item:
             parts = item.split(':')
             if len(parts) >= 2:
-                email = parts[0].strip()
-                password = parts[1].strip()
-                totp_secret = parts[2].strip() if len(parts) >= 3 else ''
                 accounts.append({
-                    'email': email,
-                    'password': password,
-                    'totp_secret': totp_secret
+                    'email': parts[0].strip(),
+                    'password': parts[1].strip(),
+                    'totp_secret': parts[2].strip() if len(parts) >= 3 else ''
                 })
     return accounts
 
@@ -100,59 +90,72 @@ class Logger:
 
 
 def get_totp_code(secret: str, totp_api_url: str) -> str:
-    """从 TOTP API 获取验证码"""
     if not totp_api_url or not secret:
         return ''
     try:
         response = requests.get(f"{totp_api_url}/totp/{secret}", timeout=10)
         if response.status_code == 200:
-            data = response.json()
-            return data.get('code', '')
+            return response.json().get('code', '')
     except Exception as e:
         Logger.log("TOTP", f"获取TOTP失败: {e}", "ERROR")
     return ''
 
 
-async def wait_for_turnstile(page, timeout: int = 60) -> bool:
-    """等待 Turnstile 验证完成"""
-    Logger.log("Turnstile", "等待 Cloudflare 验证...", "WAIT")
+async def cdp_click(cdp, x, y):
+    """使用 CDP 模拟鼠标点击"""
+    await cdp.send('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': x, 'y': y})
+    await asyncio.sleep(0.1)
+    await cdp.send('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': x, 'y': y, 'button': 'left', 'clickCount': 1})
+    await asyncio.sleep(0.05)
+    await cdp.send('Input.dispatchMouseEvent', {'type': 'mouseReleased', 'x': x, 'y': y, 'button': 'left', 'clickCount': 1})
+
+
+async def handle_cloudflare(page, cdp, max_attempts=30):
+    """处理 Cloudflare 挑战页面"""
+    Logger.log("CF", "处理 Cloudflare 验证...", "WAIT")
+    for i in range(max_attempts):
+        title = await page.title()
+        if 'Just a moment' not in title:
+            Logger.log("CF", "Cloudflare 验证通过!", "OK")
+            return True
+        # CDP 点击
+        await cdp_click(cdp, 210, 290)
+        await asyncio.sleep(2)
+    Logger.log("CF", "Cloudflare 验证超时", "ERROR")
+    return False
+
+
+async def handle_turnstile(page, cdp):
+    """处理表单中的 Turnstile 验证"""
+    Logger.log("Turnstile", "等待 Turnstile 验证...", "WAIT")
     
-    try:
-        start_time = asyncio.get_event_loop().time()
-        while asyncio.get_event_loop().time() - start_time < timeout:
-            frames = page.frames
-            for frame in frames:
-                if 'turnstile' in frame.url or 'challenges.cloudflare.com' in frame.url:
-                    try:
-                        checkbox = await frame.query_selector('input[type="checkbox"]')
-                        if checkbox:
-                            await checkbox.click()
-                            Logger.log("Turnstile", "点击验证框", "INFO")
-                    except:
-                        pass
-            
-            try:
-                response = await page.evaluate('''() => {
-                    const input = document.querySelector('input[name="cf-turnstile-response"]');
-                    return input ? input.value : '';
-                }''')
-                if response and len(response) > 10:
-                    Logger.log("Turnstile", "验证通过", "OK")
-                    return True
-            except:
-                pass
-            
-            await asyncio.sleep(1)
+    turnstile = await page.evaluate('''() => {
+        const el = document.querySelector('.cf-turnstile');
+        if (el) { const r = el.getBoundingClientRect(); return {x: r.x, y: r.y}; }
+        return null;
+    }''')
+    
+    if turnstile:
+        x = int(turnstile['x'] + 30)
+        y = int(turnstile['y'] + 32)
+        Logger.log("Turnstile", f"点击 Turnstile ({x}, {y})", "INFO")
+        await cdp_click(cdp, x, y)
         
-        Logger.log("Turnstile", "验证超时", "ERROR")
+        for i in range(15):
+            await asyncio.sleep(1)
+            response = await page.evaluate('() => document.querySelector("input[name=cf-turnstile-response]")?.value || ""')
+            if len(response) > 10:
+                Logger.log("Turnstile", "Turnstile 验证完成", "OK")
+                return True
+        
+        Logger.log("Turnstile", "Turnstile 验证超时", "WARN")
         return False
-    except Exception as e:
-        Logger.log("Turnstile", f"验证异常: {e}", "ERROR")
-        return False
+    
+    Logger.log("Turnstile", "未找到 Turnstile 元素", "INFO")
+    return True
 
 
 async def login_account(playwright, account: dict, config: dict, notifier: TelegramNotifier) -> bool:
-    """登录单个账号"""
     email = account['email']
     password = account['password']
     totp_secret = account.get('totp_secret', '')
@@ -163,14 +166,16 @@ async def login_account(playwright, account: dict, config: dict, notifier: Teleg
     try:
         browser = await playwright.chromium.launch(
             headless=False,
-            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
         )
         context = await browser.new_context(
-            viewport={'width': 1280, 'height': 720},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            viewport={'width': 1280, 'height': 900},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         )
         page = await context.new_page()
+        cdp = await context.new_cdp_session(page)
         
+        # 加载会话
         session_file = get_session_file(email)
         if session_file.exists():
             try:
@@ -181,25 +186,36 @@ async def login_account(playwright, account: dict, config: dict, notifier: Teleg
             except:
                 pass
         
+        # 访问登录页
         Logger.log("Navigate", f"访问 {LOGIN_URL}", "INFO")
         await page.goto(LOGIN_URL, wait_until='domcontentloaded', timeout=60000)
         
-        if 'clientarea.php' in page.url:
+        # 处理 Cloudflare 挑战
+        await handle_cloudflare(page, cdp)
+        await asyncio.sleep(3)
+        
+        # 检查是否已登录
+        if 'clientarea' in page.url:
             Logger.log("Login", "已登录，无需重新登录", "OK")
             cookies = await context.cookies()
             with open(session_file, 'w') as f:
                 json.dump(cookies, f)
             return True
         
-        await wait_for_turnstile(page)
+        # 处理 Turnstile
+        await handle_turnstile(page, cdp)
         
+        # 填写登录表单
         Logger.log("Form", "填写登录表单", "INFO")
-        await page.fill('input[name="username"]', email)
-        await page.fill('input[name="password"]', password)
+        await page.fill('#inputEmail', email)
+        await page.fill('#inputPassword', password)
         
-        await page.click('input[type="submit"], button[type="submit"]')
-        await asyncio.sleep(3)
+        # 点击登录按钮
+        Logger.log("Login", "点击登录按钮", "INFO")
+        await page.click('button[type="submit"]')
+        await asyncio.sleep(5)
         
+        # 处理 2FA
         if totp_secret:
             try:
                 totp_input = await page.query_selector('input[name="code"], input[name="twoFactorCode"]')
@@ -208,21 +224,29 @@ async def login_account(playwright, account: dict, config: dict, notifier: Teleg
                     totp_code = get_totp_code(totp_secret, config['totp_api_url'])
                     if totp_code:
                         await totp_input.fill(totp_code)
-                        await page.click('input[type="submit"], button[type="submit"]')
+                        await page.click('button[type="submit"]')
                         await asyncio.sleep(3)
                         Logger.log("2FA", "已提交2FA验证码", "OK")
             except:
                 pass
         
-        await page.wait_for_load_state('networkidle', timeout=30000)
+        # 再次处理可能的 Cloudflare
+        await handle_cloudflare(page, cdp, 10)
+        await asyncio.sleep(3)
         
-        if 'clientarea.php' in page.url or 'dashboard' in page.url.lower():
+        # 检查登录结果
+        url = page.url
+        text = await page.evaluate('() => document.body.innerText')
+        
+        if 'clientarea' in url or '退出' in text or 'Logout' in text:
             Logger.log("Login", f"登录成功: {email}", "OK")
             
+            # 保存会话
             cookies = await context.cookies()
             with open(session_file, 'w') as f:
                 json.dump(cookies, f)
             
+            # 停留
             Logger.log("Stay", f"停留 {config['stay_duration']} 秒", "WAIT")
             await asyncio.sleep(config['stay_duration'])
             
@@ -243,13 +267,10 @@ async def login_account(playwright, account: dict, config: dict, notifier: Teleg
 
 
 async def main():
-    """主函数"""
     Logger.log("Start", "56idc 自动登录脚本启动", "INFO")
     
-    # 获取配置
     config = get_config()
     
-    # 检查环境变量
     if not config['accounts_str']:
         Logger.log("Config", "错误: 未设置 ACCOUNTS_56IDC 环境变量", "ERROR")
         sys.exit(1)
