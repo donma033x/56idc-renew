@@ -162,7 +162,7 @@ async def login_account(playwright, account: dict, config: dict, notifier: Teleg
     browser = None
     try:
         browser = await playwright.chromium.launch(
-            headless=True,
+            headless=False,
             args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
         )
         context = await browser.new_context(
