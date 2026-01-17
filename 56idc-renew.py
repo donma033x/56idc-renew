@@ -22,21 +22,28 @@ new Env('56idc-renew')
 import os
 import asyncio
 import json
+import sys
 import requests
 from pathlib import Path
 from datetime import datetime
 from playwright.async_api import async_playwright
 
-# ==================== 从环境变量加载配置 ====================
-ACCOUNTS_STR = os.environ.get('ACCOUNTS_56IDC', '')
-STAY_DURATION = int(os.environ.get('STAY_DURATION', '10'))
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
-TOTP_API_URL = os.environ.get('TOTP_API_URL', '')
-
+# 常量
 LOGIN_URL = "https://56idc.net/login.php"
 DASHBOARD_URL = "https://56idc.net/clientarea.php"
 SESSION_DIR = Path(__file__).parent / "sessions"
+
+
+def get_config():
+    """获取配置 - 在运行时读取环境变量"""
+    return {
+        'accounts_str': os.environ.get('ACCOUNTS_56IDC', ''),
+        'stay_duration': int(os.environ.get('STAY_DURATION', '10')),
+        'telegram_bot_token': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
+        'telegram_chat_id': os.environ.get('TELEGRAM_CHAT_ID', ''),
+        'totp_api_url': os.environ.get('TOTP_API_URL', ''),
+    }
+
 
 def parse_accounts(accounts_str: str) -> list:
     """解析账号配置，格式: 邮箱:密码:2FA密钥 (2FA密钥可选)"""
@@ -57,6 +64,7 @@ def parse_accounts(accounts_str: str) -> list:
                     'totp_secret': totp_secret
                 })
     return accounts
+
 
 def get_session_file(email: str) -> Path:
     SESSION_DIR.mkdir(exist_ok=True)
@@ -88,15 +96,15 @@ class Logger:
         timestamp = datetime.now().strftime("%H:%M:%S")
         symbols = {"INFO": "ℹ", "OK": "✓", "WARN": "⚠", "ERROR": "✗", "WAIT": "⏳"}
         symbol = symbols.get(status, "•")
-        print(f"[{timestamp}] [{step}] {symbol} {msg}")
+        print(f"[{timestamp}] [{step}] {symbol} {msg}", flush=True)
 
 
-def get_totp_code(secret: str) -> str:
+def get_totp_code(secret: str, totp_api_url: str) -> str:
     """从 TOTP API 获取验证码"""
-    if not TOTP_API_URL or not secret:
+    if not totp_api_url or not secret:
         return ''
     try:
-        response = requests.get(f"{TOTP_API_URL}/totp/{secret}", timeout=10)
+        response = requests.get(f"{totp_api_url}/totp/{secret}", timeout=10)
         if response.status_code == 200:
             data = response.json()
             return data.get('code', '')
@@ -112,11 +120,9 @@ async def wait_for_turnstile(page, timeout: int = 60) -> bool:
     try:
         start_time = asyncio.get_event_loop().time()
         while asyncio.get_event_loop().time() - start_time < timeout:
-            # 检查是否有 turnstile iframe
             frames = page.frames
             for frame in frames:
                 if 'turnstile' in frame.url or 'challenges.cloudflare.com' in frame.url:
-                    # 尝试点击验证框
                     try:
                         checkbox = await frame.query_selector('input[type="checkbox"]')
                         if checkbox:
@@ -125,7 +131,6 @@ async def wait_for_turnstile(page, timeout: int = 60) -> bool:
                     except:
                         pass
             
-            # 检查隐藏的 turnstile response
             try:
                 response = await page.evaluate('''() => {
                     const input = document.querySelector('input[name="cf-turnstile-response"]');
@@ -146,7 +151,7 @@ async def wait_for_turnstile(page, timeout: int = 60) -> bool:
         return False
 
 
-async def login_account(playwright, account: dict, notifier: TelegramNotifier) -> bool:
+async def login_account(playwright, account: dict, config: dict, notifier: TelegramNotifier) -> bool:
     """登录单个账号"""
     email = account['email']
     password = account['password']
@@ -166,7 +171,6 @@ async def login_account(playwright, account: dict, notifier: TelegramNotifier) -
         )
         page = await context.new_page()
         
-        # 加载已保存的 session
         session_file = get_session_file(email)
         if session_file.exists():
             try:
@@ -177,40 +181,31 @@ async def login_account(playwright, account: dict, notifier: TelegramNotifier) -
             except:
                 pass
         
-        # 访问登录页
         Logger.log("Navigate", f"访问 {LOGIN_URL}", "INFO")
         await page.goto(LOGIN_URL, wait_until='networkidle', timeout=60000)
         
-        # 检查是否已登录
         if 'clientarea.php' in page.url:
             Logger.log("Login", "已登录，无需重新登录", "OK")
-            # 保存 session
             cookies = await context.cookies()
             with open(session_file, 'w') as f:
                 json.dump(cookies, f)
             return True
         
-        # 等待 Turnstile 验证
         await wait_for_turnstile(page)
         
-        # 填写登录表单
         Logger.log("Form", "填写登录表单", "INFO")
         await page.fill('input[name="username"]', email)
         await page.fill('input[name="password"]', password)
         
-        # 点击登录按钮
         await page.click('input[type="submit"], button[type="submit"]')
-        
-        # 等待页面响应
         await asyncio.sleep(3)
         
-        # 检查是否需要2FA
         if totp_secret:
             try:
                 totp_input = await page.query_selector('input[name="code"], input[name="twoFactorCode"]')
                 if totp_input:
                     Logger.log("2FA", "需要2FA验证", "INFO")
-                    totp_code = get_totp_code(totp_secret)
+                    totp_code = get_totp_code(totp_secret, config['totp_api_url'])
                     if totp_code:
                         await totp_input.fill(totp_code)
                         await page.click('input[type="submit"], button[type="submit"]')
@@ -219,20 +214,17 @@ async def login_account(playwright, account: dict, notifier: TelegramNotifier) -
             except:
                 pass
         
-        # 检查登录结果
         await page.wait_for_load_state('networkidle', timeout=30000)
         
         if 'clientarea.php' in page.url or 'dashboard' in page.url.lower():
             Logger.log("Login", f"登录成功: {email}", "OK")
             
-            # 保存 session
             cookies = await context.cookies()
             with open(session_file, 'w') as f:
                 json.dump(cookies, f)
             
-            # 停留一段时间
-            Logger.log("Stay", f"停留 {STAY_DURATION} 秒", "WAIT")
-            await asyncio.sleep(STAY_DURATION)
+            Logger.log("Stay", f"停留 {config['stay_duration']} 秒", "WAIT")
+            await asyncio.sleep(config['stay_duration'])
             
             notifier.send(f"✅ 56idc 登录成功\n账号: {email}")
             return True
@@ -254,19 +246,22 @@ async def main():
     """主函数"""
     Logger.log("Start", "56idc 自动登录脚本启动", "INFO")
     
-    # 检查环境变量
-    if not ACCOUNTS_STR:
-        Logger.log("Config", "错误: 未设置 ACCOUNTS_56IDC 环境变量", "ERROR")
-        return
+    # 获取配置
+    config = get_config()
     
-    accounts = parse_accounts(ACCOUNTS_STR)
+    # 检查环境变量
+    if not config['accounts_str']:
+        Logger.log("Config", "错误: 未设置 ACCOUNTS_56IDC 环境变量", "ERROR")
+        sys.exit(1)
+    
+    accounts = parse_accounts(config['accounts_str'])
     if not accounts:
         Logger.log("Config", "错误: 无有效账号配置", "ERROR")
-        return
+        sys.exit(1)
     
     Logger.log("Config", f"共 {len(accounts)} 个账号", "INFO")
     
-    notifier = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+    notifier = TelegramNotifier(config['telegram_bot_token'], config['telegram_chat_id'])
     
     success_count = 0
     fail_count = 0
@@ -275,17 +270,15 @@ async def main():
         for i, account in enumerate(accounts, 1):
             Logger.log("Progress", f"处理第 {i}/{len(accounts)} 个账号", "INFO")
             
-            if await login_account(playwright, account, notifier):
+            if await login_account(playwright, account, config, notifier):
                 success_count += 1
             else:
                 fail_count += 1
             
-            # 账号间间隔
             if i < len(accounts):
                 Logger.log("Wait", "等待 5 秒后处理下一个账号", "WAIT")
                 await asyncio.sleep(5)
     
-    # 汇总
     Logger.log("Summary", f"完成: 成功 {success_count}, 失败 {fail_count}", "INFO")
     
     if success_count > 0 or fail_count > 0:
