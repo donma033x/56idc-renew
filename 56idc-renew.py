@@ -9,8 +9,6 @@ new Env('56idc-renew')
     ACCOUNTS_56IDC: 账号配置，格式: 邮箱:密码:2FA密钥,邮箱:密码 (2FA密钥可选)
     STAY_DURATION: 停留时间(秒)，默认10
     TOTP_API_URL: TOTP API地址
-    TELEGRAM_BOT_TOKEN: Telegram机器人Token (可选)
-    TELEGRAM_CHAT_ID: Telegram聊天ID (可选)
 """
 
 import os
@@ -20,6 +18,12 @@ import sys
 import requests
 from pathlib import Path
 from datetime import datetime
+
+# 青龙通知
+try:
+    from notify import send as notify_send
+except ImportError:
+    def notify_send(title, content): print(f"[通知] {title}: {content}")
 from playwright.async_api import async_playwright
 
 # 常量
@@ -33,8 +37,6 @@ def get_config():
     return {
         'accounts_str': os.environ.get('ACCOUNTS_56IDC', ''),
         'stay_duration': int(os.environ.get('STAY_DURATION', '10')),
-        'telegram_bot_token': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
-        'telegram_chat_id': os.environ.get('TELEGRAM_CHAT_ID', ''),
         'totp_api_url': os.environ.get('TOTP_API_URL', ''),
     }
 
@@ -62,22 +64,6 @@ def get_session_file(email: str) -> Path:
     return SESSION_DIR / f"{safe_name}.json"
 
 
-class TelegramNotifier:
-    def __init__(self, bot_token: str, chat_id: str):
-        self.bot_token = bot_token
-        self.chat_id = chat_id
-        self.enabled = bool(bot_token and chat_id)
-    
-    def send(self, message: str) -> bool:
-        if not self.enabled:
-            return False
-        try:
-            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-            payload = {"chat_id": self.chat_id, "text": message, "parse_mode": "HTML"}
-            response = requests.post(url, json=payload, timeout=10)
-            return response.status_code == 200
-        except:
-            return False
 
 
 class Logger:
@@ -155,7 +141,7 @@ async def handle_turnstile(page, cdp):
     return True
 
 
-async def login_account(playwright, account: dict, config: dict, notifier: TelegramNotifier) -> bool:
+async def login_account(playwright, account: dict, config: dict) -> bool:
     email = account['email']
     password = account['password']
     totp_secret = account.get('totp_secret', '')
@@ -250,16 +236,13 @@ async def login_account(playwright, account: dict, config: dict, notifier: Teleg
             Logger.log("Stay", f"停留 {config['stay_duration']} 秒", "WAIT")
             await asyncio.sleep(config['stay_duration'])
             
-            notifier.send(f"✅ 56idc 登录成功\n账号: {email}")
             return True
         else:
             Logger.log("Login", f"登录失败: {email}", "ERROR")
-            notifier.send(f"❌ 56idc 登录失败\n账号: {email}")
             return False
             
     except Exception as e:
         Logger.log("Error", f"登录异常: {e}", "ERROR")
-        notifier.send(f"❌ 56idc 登录异常\n账号: {email}\n错误: {str(e)}")
         return False
     finally:
         if browser:
@@ -282,7 +265,6 @@ async def main():
     
     Logger.log("Config", f"共 {len(accounts)} 个账号", "INFO")
     
-    notifier = TelegramNotifier(config['telegram_bot_token'], config['telegram_chat_id'])
     
     success_count = 0
     fail_count = 0
@@ -291,7 +273,7 @@ async def main():
         for i, account in enumerate(accounts, 1):
             Logger.log("Progress", f"处理第 {i}/{len(accounts)} 个账号", "INFO")
             
-            if await login_account(playwright, account, config, notifier):
+            if await login_account(playwright, account, config):
                 success_count += 1
             else:
                 fail_count += 1
@@ -302,8 +284,18 @@ async def main():
     
     Logger.log("Summary", f"完成: 成功 {success_count}, 失败 {fail_count}", "INFO")
     
-    if success_count > 0 or fail_count > 0:
-        notifier.send(f"📊 56idc 登录汇总\n成功: {success_count}\n失败: {fail_count}")
+    # 发送汇总通知
+    if success_count == len(accounts):
+        title = "56idc 登录成功"
+        msg = f"✅ 全部 {success_count} 个账号登录成功"
+    elif success_count > 0:
+        title = "56idc 登录部分成功"
+        msg = f"⚠️ 成功 {success_count} 个，失败 {fail_count} 个"
+    else:
+        title = "56idc 登录失败"
+        msg = f"❌ 全部 {fail_count} 个账号登录失败"
+    
+    notify_send(title, msg)
 
 
 if __name__ == '__main__':
